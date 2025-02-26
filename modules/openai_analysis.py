@@ -26,7 +26,7 @@ def analyze_transcription(transcription_text: str) -> str:
     # Configure OpenAI for Azure OpenAI.
     openai.api_type = "azure"
     openai.api_base = endpoint
-    openai.api_version = "2023-07-01-preview"
+    openai.api_version = "2025-01-01-preview"
     openai.api_key = api_key
 
     chat_prompt = [

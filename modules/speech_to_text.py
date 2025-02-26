@@ -18,9 +18,12 @@ def create_speech_config(language: str, auto_detection: bool = False):
     Creates and returns a configured SpeechConfig.
     If auto_detection is True, then the custom endpoint is not set
     because custom endpoints are unsupported in auto language detection scenarios.
+    Additionally, sets the profanity option to Raw so that all words (including profanity) are returned.
     """
     speech_config = speechsdk.SpeechConfig(subscription=SPEECH_KEY, region=SPEECH_REGION)
     speech_config.speech_recognition_language = language
+    # Set profanity to Raw (i.e., do not mask or remove profane words)
+    speech_config.set_profanity(speechsdk.ProfanityOption.Raw)
     if not auto_detection and SPEECH_ENDPOINT:
         # Only set the endpoint when not using auto language detection.
         speech_config.endpoint_id = SPEECH_ENDPOINT
@@ -50,7 +53,7 @@ def detect_language_from_audio(file_path: str, possible_languages=["en-US", "ro-
         detected_lang_str = result.properties.get(
             speechsdk.PropertyId.SpeechServiceConnection_AutoDetectSourceLanguageResult
         )
-        # Return the raw string, e.g., "ro-RO", "en-US", etc.
+        # Return the raw string, e.g., "en-US", "ro-RO", etc.
         if detected_lang_str:
             return detected_lang_str
 
@@ -76,10 +79,7 @@ def transcribe_with_diarization(file_path: str, language: str = "auto"):
     speech_config.set_property(property_id=speechsdk.PropertyId.SpeechServiceResponse_DiarizeIntermediateResults, value='true')
     
     audio_config = speechsdk.audio.AudioConfig(filename=file_path)
-    conversation_transcriber = speechsdk.transcription.ConversationTranscriber(
-        speech_config=speech_config, 
-        audio_config=audio_config
-    )
+    conversation_transcriber = speechsdk.transcription.ConversationTranscriber(speech_config=speech_config, audio_config=audio_config)
     
     transcription_results = []
     transcription_complete = threading.Event()

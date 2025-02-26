@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import os, time
 from datetime import datetime
@@ -6,12 +5,20 @@ from modules.speech_to_text import transcribe_with_diarization, detect_language_
 from modules.docx_export import export_transcription_to_docx
 from modules.azure_storage import upload_file_to_azure_storage
 from modules.openai_analysis import analyze_transcription
+from modules.text_cleaning import clean_segments_with_openai
 
 # ---------------------------
 # Helper: Clear Session State for New Upload
 # ---------------------------
 def clear_previous_session():
-    keys_to_clear = ["temp_file_path", "detected_language", "transcription_results", "uploaded_filename", "analysis_result"]
+    keys_to_clear = [
+        "temp_file_path",
+        "detected_language",
+        "transcription_results",
+        "uploaded_filename",
+        "analysis_result",
+        "cleaned_transcription"
+    ]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
@@ -25,7 +32,7 @@ def upload_and_transcribe():
     uploaded_file = st.file_uploader("Upload an audio file (MP3/WAV)", type=["mp3", "wav"], key="upload")
     
     if uploaded_file is not None:
-        # Check if a different file has been uploaded; if so, clear previous session state.
+        # If a different file is uploaded, clear previous state.
         if st.session_state.get("uploaded_filename") != uploaded_file.name:
             clear_previous_session()
             st.session_state.uploaded_filename = uploaded_file.name
@@ -43,19 +50,25 @@ def upload_and_transcribe():
         if not st.session_state.get("detected_language"):
             with st.spinner("Detecting language..."):
                 try:
-                    # If your files are Romanian, you might narrow the list:
-                    detected_language = detect_language_from_audio(st.session_state.temp_file_path, possible_languages=["ro-RO", "en-US"])
+                    # Prioritize Romanian first.
+                    detected_language = detect_language_from_audio(
+                        st.session_state.temp_file_path, possible_languages=["ro-RO", "en-US"]
+                    )
                     st.session_state.detected_language = detected_language
                 except Exception as e:
                     st.error(f"Language detection failed: {e}")
-                    st.session_state.detected_language = "en-US"  # Fallback language.
+                    st.session_state.detected_language = "en-US"  # Fallback.
         st.success(f"Detected language: {st.session_state.detected_language}")
         
         # Allow user to override detected language.
         language_options = ["ro-RO", "en-US"]
         default_index = 0 if st.session_state.detected_language == "ro-RO" else 1
-        language_override = st.selectbox("Override detected language (if needed):",
-                                         options=language_options, index=default_index, key="lang_override")
+        language_override = st.selectbox(
+            "Override detected language (if needed):",
+            options=language_options,
+            index=default_index,
+            key="lang_override"
+        )
         
         if st.button("Start Transcription", key="transcribe_button"):
             if not st.session_state.get("temp_file_path"):
@@ -83,37 +96,62 @@ def review_and_edit():
         st.warning("No audio file uploaded yet. Please complete step 1.")
         return
 
-    # Audio playback is here.
+    # Audio playback
     st.audio(st.session_state.temp_file_path, format="audio/wav")
     
     if not st.session_state.get("transcription_results"):
         st.warning("No transcription results available. Please complete transcription first.")
         return
 
-    # Form for editing transcription segments.
+    st.subheader("Edit Transcription Segments")
     with st.form("edit_transcription_form"):
         edited_transcriptions = []
-        st.subheader("Edit Transcription Segments")
+        
+        # Create a text area for each diarized segment.
         for i, segment in enumerate(st.session_state.transcription_results):
             speaker = segment.get("speaker_id", "Unknown")
             text = segment.get("text", "")
-            new_text = st.text_area(f"Segment {i+1} - Speaker {speaker}", value=text, key=f"segment_{i}")
-            edited_transcriptions.append({
-                **segment,
-                "text": new_text
-            })
-        if st.form_submit_button("Save Edits"):
+            new_text = st.text_area(
+                label=f"Segment {i+1} - Speaker {speaker}",
+                value=text,
+                key=f"segment_{i}"
+            )
+            edited_transcriptions.append({**segment, "text": new_text})
+
+        # Two buttons side by side: Save Edits and Clean All Segments.
+        col1, col2 = st.columns(2)
+        with col1:
+            save_edits = st.form_submit_button("Save Edits")
+        with col2:
+            clean_segments = st.form_submit_button("Clean All Segments")
+
+        if save_edits:
             st.session_state.transcription_results = edited_transcriptions
             st.success("Transcription edits saved!")
-    
-    # Form for assigning friendly speaker names.
+
+        if clean_segments:
+            try:
+                cleaned_transcriptions = clean_segments_with_openai(edited_transcriptions)
+                st.session_state.transcription_results = cleaned_transcriptions
+                # Optionally, also store a combined version.
+                st.session_state.cleaned_transcription = "\n".join([seg["text"] for seg in cleaned_transcriptions])
+                st.success("All segments cleaned!")
+            except Exception as e:
+                st.error(f"Text cleaning failed: {e}")
+
+    st.subheader("Assign Speaker Names")
     with st.form("assign_names_form"):
-        st.subheader("Assign Speaker Names")
         speaker_names = {}
         unique_speakers = {seg.get("speaker_id", "Unknown") for seg in st.session_state.transcription_results}
+        
         for speaker in unique_speakers:
-            name = st.text_input(f"Name for Speaker {speaker}", value=f"Speaker {speaker}", key=f"name_{speaker}")
+            name = st.text_input(
+                label=f"Name for Speaker {speaker}",
+                value=f"Speaker {speaker}",
+                key=f"name_{speaker}"
+            )
             speaker_names[speaker] = name
+        
         if st.form_submit_button("Save Speaker Names"):
             for seg in st.session_state.transcription_results:
                 seg["speaker_name"] = speaker_names.get(seg.get("speaker_id", "Unknown"), "Unknown")
@@ -159,8 +197,9 @@ def export_and_save():
         st.warning("No transcription available. Please complete transcription and editing first.")
         return
 
-    # Retrieve analysis text if available.
     analysis_text = st.session_state.get("analysis_result", None)
+    # Use the updated transcription segments (with cleaned text if available)
+    final_transcription = st.session_state.transcription_results
     
     if st.button("Generate DOCX and Download", key="download_button"):
         with st.spinner("Generating DOCX..."):
@@ -168,9 +207,10 @@ def export_and_save():
                 unique_suffix = datetime.now().strftime("%Y%m%d%H%M%S")
                 output_filename = f"transcription_{unique_suffix}.docx"
                 docx_file = export_transcription_to_docx(
-                    st.session_state.transcription_results,
+                    final_transcription,
                     analysis_text=analysis_text,
-                    output_filename=output_filename
+                    output_filename=output_filename,
+                    cleaned_transcription=st.session_state.get("cleaned_transcription")
                 )
                 with open(docx_file, "rb") as f:
                     st.download_button("Download DOCX", data=f.read(), file_name=docx_file)
@@ -201,7 +241,12 @@ def export_and_save():
         
         # Generate DOCX file and upload it with a unique blob name.
         try:
-            output_docx = export_transcription_to_docx(st.session_state.transcription_results, analysis_text=analysis_text)
+            output_docx = export_transcription_to_docx(
+                st.session_state.transcription_results,
+                analysis_text=analysis_text,
+                output_filename=f"{unique_suffix}_transcription.docx",
+                cleaned_transcription=st.session_state.get("cleaned_transcription")
+            )
             docx_blob_name = f"{unique_suffix}_transcription.docx"
             docx_url = upload_file_to_azure_storage(
                 output_docx,
@@ -223,8 +268,8 @@ def export_and_save():
 def main():
     st.title("Azure AI Speech Transcription Demo")
     st.markdown(
-        "This demo showcases Azure Speech Service with diarization, automatic language detection, and cloud-based analysis using Azure OpenAI GPT-4o. "
-        "It includes functionalities for file upload, transcription, review & edit, as well as features for analysis and exporting the results (including analysis) to a DOCX file."
+        "This demo showcases Azure Speech Service with diarization, automatic language detection, cloud-based analysis using Azure OpenAI GPT-4o, "
+        "and post-processing of transcriptions with OpenAI for cleaning and correction. Use the tabs below to progress through each step."
     )
     
     tabs = st.tabs(["Upload & Transcribe", "Review & Edit", "Analysis", "Export & Save"])
@@ -248,5 +293,7 @@ if __name__ == "__main__":
         st.session_state.uploaded_filename = None
     if "analysis_result" not in st.session_state:
         st.session_state.analysis_result = None
+    if "cleaned_transcription" not in st.session_state:
+        st.session_state.cleaned_transcription = None
     
     main()
